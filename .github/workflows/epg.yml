@@ -1,0 +1,46 @@
+name: Build EPG
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"   # de 3 em 3 horas (UTC)
+  workflow_dispatch:          # permite correr manualmente
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Gerar EPG
+        env:
+          XTREAM_HOST: ${{ secrets.XTREAM_HOST }}
+          XTREAM_USER: ${{ secrets.XTREAM_USER }}
+          XTREAM_PASS: ${{ secrets.XTREAM_PASS }}
+          PAST_DAYS: "7"
+        run: python build_epg.py
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
