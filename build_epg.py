@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Gera um XMLTV com histórico (catchup) a partir de um servidor Xtream Codes.
+Builds an XMLTV guide with past listings (catchup) from an Xtream Codes server.
 
-- Programação futura: vem do xmltv.php do fornecedor (mantém ícones, categorias, etc.)
-- Programação passada: vem da API get_simple_data_table, só para canais com catchup (tv_archive=1)
-- Resultado: public/epg.xml e public/epg.xml.gz
+- Upcoming listings: from the provider's xmltv.php (keeps icons, categories, etc.)
+- Past (and missing) listings: from the get_simple_data_table API, for every channel with an EPG id
+- Output: public/epg.xml and public/epg.xml.gz
 
-Só usa a biblioteca padrão do Python (3.9+). Credenciais lidas de variáveis de ambiente:
-  XTREAM_HOST  ex: http://thesinner.fit
+Standard library only (Python 3.9+). Credentials are read from environment variables:
+  XTREAM_HOST  e.g. http://example-server.com:8080
   XTREAM_USER
   XTREAM_PASS
-Opcionais:
-  PAST_DAYS (default 7)   dias de histórico a incluir
-  WORKERS   (default 6)   pedidos em paralelo à API
+Optional:
+  PAST_DAYS (default 7)   days of history to include
+  WORKERS   (default 6)   parallel API requests
+  FETCH_ALL (default 1)   1 = query API for all channels, 0 = catchup channels only
   OUT_DIR   (default public)
 """
 import base64
@@ -86,8 +87,8 @@ def main():
     now = int(time.time())
     cutoff = now - PAST_DAYS * 86400
 
-    # 1) EPG base (hoje + futuro)
-    print("A descarregar xmltv.php…", flush=True)
+    # 1) Base EPG (today + upcoming)
+    print("Downloading xmltv.php...", flush=True)
     q = urllib.parse.urlencode({"username": USER, "password": PASS})
     root = ET.fromstring(fetch(f"{HOST}/xmltv.php?{q}", timeout=180))
 
@@ -100,19 +101,25 @@ def main():
         if start is not None:
             programmes[(p.get("channel"), start)] = p
     base_count = len(programmes)
-    print(f"  {len(channels)} canais, {base_count} programas no XMLTV", flush=True)
+    print(f"  {len(channels)} channels, {base_count} programmes in XMLTV", flush=True)
 
-    # 2) Canais com catchup (um stream por epg_channel_id)
-    print("A obter lista de canais…", flush=True)
+    # 2) Catchup channels (one stream per epg_channel_id)
+    print("Fetching channel list...", flush=True)
     streams = api("get_live_streams")
+    # FETCH_ALL=1 (default): query the API for every channel with an EPG id, so channels
+    # missing from (or sparse in) xmltv.php still get a full guide. Catchup streams are preferred.
+    fetch_all = os.environ.get("FETCH_ALL", "1") == "1"
     archive = {}  # epg_id -> (stream_id, name)
-    for s in streams:
+    ordered = sorted(streams, key=lambda s: str(s.get("tv_archive", "0")) != "1")
+    for s in ordered:
         epg_id = s.get("epg_channel_id")
-        if epg_id and str(s.get("tv_archive", "0")) == "1" and epg_id not in archive:
+        is_archive = str(s.get("tv_archive", "0")) == "1"
+        if epg_id and (is_archive or fetch_all) and epg_id not in archive:
             archive[epg_id] = (s["stream_id"], s.get("name", epg_id))
-    print(f"  {len(archive)} canais com catchup", flush=True)
+    n_arch = sum(1 for s in streams if str(s.get("tv_archive", "0")) == "1" and s.get("epg_channel_id"))
+    print(f"  {len(archive)} channels to query via API ({n_arch} catchup streams)", flush=True)
 
-    # 3) Histórico via API
+    # 3) Past listings via API
     def get_listings(epg_id, stream_id):
         data = api("get_simple_data_table", stream_id=stream_id)
         return epg_id, data.get("epg_listings", []) if isinstance(data, dict) else []
@@ -142,16 +149,16 @@ def main():
                 programmes[(epg_id, start)] = p
                 added += 1
             if i % 50 == 0:
-                print(f"  {i}/{len(futures)} canais processados", flush=True)
+                print(f"  {i}/{len(futures)} channels processed", flush=True)
 
-    # Canais com catchup que não existam no XMLTV
+    # Catchup channels missing from the XMLTV
     for epg_id, (_, name) in archive.items():
         if epg_id not in channels:
             ch = ET.Element("channel", id=epg_id)
             ET.SubElement(ch, "display-name").text = name
             channels[epg_id] = ch
 
-    # 4) Escrever
+    # 4) Write output
     out = ET.Element("tv", {"generator-info-name": "uhf-catchup-epg"})
     for ch in channels.values():
         out.append(ch)
@@ -165,10 +172,10 @@ def main():
     with gzip.open(os.path.join(OUT_DIR, "epg.xml.gz"), "wb") as f:
         f.write(xml_bytes)
 
-    print(f"Concluído: {base_count} programas base + {added} do histórico "
-          f"({failed} canais falharam). Tamanho: {len(xml_bytes) / 1e6:.1f} MB", flush=True)
+    print(f"Done: {base_count} base programmes + {added} programmes from the API "
+          f"({failed} channels failed). Size: {len(xml_bytes) / 1e6:.1f} MB", flush=True)
     if base_count == 0 and added == 0:
-        sys.exit("Nenhum programa obtido — verifica as credenciais/servidor.")
+        sys.exit("No programmes retrieved - check your credentials/server URL.")
 
 
 if __name__ == "__main__":
