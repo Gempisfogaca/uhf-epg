@@ -34,6 +34,7 @@ PASS = os.environ["XTREAM_PASS"]
 PAST_DAYS = int(os.environ.get("PAST_DAYS", "7"))
 WORKERS = int(os.environ.get("WORKERS", "6"))
 OUT_DIR = os.environ.get("OUT_DIR", "public")
+MAX_TRIES = int(os.environ.get("MAX_TRIES", "4"))  # streams tried per EPG id
 UA = "VLC/3.0.20 LibVLC/3.0.20"
 
 
@@ -109,24 +110,40 @@ def main():
     # FETCH_ALL=1 (default): query the API for every channel with an EPG id, so channels
     # missing from (or sparse in) xmltv.php still get a full guide. Catchup streams are preferred.
     fetch_all = os.environ.get("FETCH_ALL", "1") == "1"
-    archive = {}  # epg_id -> (stream_id, name)
+    # Several streams (SD/HD/FHD/alt) can share one epg_channel_id, and some of them return
+    # no listings. Keep every candidate (catchup streams first) and try them in turn.
+    archive = {}  # epg_id -> ([stream_ids], name)
     ordered = sorted(streams, key=lambda s: str(s.get("tv_archive", "0")) != "1")
     for s in ordered:
         epg_id = s.get("epg_channel_id")
         is_archive = str(s.get("tv_archive", "0")) == "1"
-        if epg_id and (is_archive or fetch_all) and epg_id not in archive:
-            archive[epg_id] = (s["stream_id"], s.get("name", epg_id))
+        if epg_id and (is_archive or fetch_all):
+            if epg_id not in archive:
+                archive[epg_id] = ([], s.get("name", epg_id))
+            if len(archive[epg_id][0]) < MAX_TRIES:
+                archive[epg_id][0].append(s["stream_id"])
     n_arch = sum(1 for s in streams if str(s.get("tv_archive", "0")) == "1" and s.get("epg_channel_id"))
     print(f"  {len(archive)} channels to query via API ({n_arch} catchup streams)", flush=True)
 
     # 3) Past listings via API
-    def get_listings(epg_id, stream_id):
-        data = api("get_simple_data_table", stream_id=stream_id)
-        return epg_id, data.get("epg_listings", []) if isinstance(data, dict) else []
+    def get_listings(epg_id, stream_ids):
+        best = []
+        for sid in stream_ids:
+            try:
+                data = api("get_simple_data_table", stream_id=sid)
+            except Exception:  # noqa: BLE001
+                continue
+            listings = data.get("epg_listings", []) if isinstance(data, dict) else []
+            if len(listings) > len(best):
+                best = listings
+            # Stop once a stream returns past listings
+            if any(int(i.get("start_timestamp", now)) < now - 86400 for i in listings):
+                break
+        return epg_id, best
 
     added, failed = 0, 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = [pool.submit(get_listings, e, sid) for e, (sid, _) in archive.items()]
+        futures = [pool.submit(get_listings, e, sids) for e, (sids, _) in archive.items()]
         for i, fut in enumerate(as_completed(futures), 1):
             try:
                 epg_id, listings = fut.result()
