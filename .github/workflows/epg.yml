@@ -36,8 +36,6 @@ jobs:
           PAST_DAYS: "7"
         run: python build_epg.py
 
-      - uses: actions/configure-pages@v5
-
       - uses: actions/upload-pages-artifact@v5
         with:
           path: public
