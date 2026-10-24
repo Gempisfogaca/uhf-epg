@@ -2,8 +2,8 @@ name: Build EPG
 
 on:
   schedule:
-    - cron: "17 */3 * * *"   # de 3 em 3 horas (UTC)
-  workflow_dispatch:          # permite correr manualmente
+    - cron: "17 */3 * * *"   # every 3 hours (UTC)
+  workflow_dispatch:          # allows manual runs
 
 permissions:
   contents: read
@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -20,15 +20,15 @@ jobs:
     timeout-minutes: 45
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deploy.outputs.page_url || steps.deploy_retry.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Gerar EPG
+      - name: Generate EPG
         env:
           XTREAM_HOST: ${{ secrets.XTREAM_HOST }}
           XTREAM_USER: ${{ secrets.XTREAM_USER }}
@@ -38,9 +38,18 @@ jobs:
 
       - uses: actions/configure-pages@v5
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: public
 
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+
+      - name: Wait before retry
+        if: steps.deploy.outcome == 'failure'
+        run: sleep 60
+
+      - id: deploy_retry
+        if: steps.deploy.outcome == 'failure'
+        uses: actions/deploy-pages@v5
